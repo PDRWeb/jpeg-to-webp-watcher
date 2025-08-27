@@ -8,9 +8,11 @@ from watchdog.events import FileSystemEventHandler
 # --- Configuration ---
 INPUT_DIR = os.environ.get("INPUT_DIR", "/data/input")
 OUTPUT_DIR = os.environ.get("OUTPUT_DIR", "/data/output")
-WEBP_QUALITY = int(os.environ.get("WEBP_QUALITY", 100))
-WEBP_METHOD = int(os.environ.get("WEBP_METHOD", 4))
+WEBP_QUALITY = int(os.environ.get("WEBP_QUALITY", 82))
+WEBP_METHOD = int(os.environ.get("WEBP_METHOD", 6))
 WEBP_LOSSLESS = os.environ.get("WEBP_LOSSLESS", "false").lower() == "true"
+RETRY_ATTEMPTS = int(os.environ.get("RETRY_ATTEMPTS", 3))
+RETRY_DELAY = float(os.environ.get("RETRY_DELAY", 2))  # seconds
 
 # --- Logging setup ---
 logging.basicConfig(
@@ -21,8 +23,8 @@ logging.basicConfig(
 # --- Conversion function ---
 def convert_to_webp(src_path):
     basename = os.path.basename(src_path)
-    
-    # Ignore temp or network files
+
+    # Ignore temporary/network files
     if basename.startswith(".") or basename.startswith("~") or ".smbdelete" in basename:
         logging.debug(f"Ignored temporary file: {src_path}")
         return
@@ -38,7 +40,7 @@ def convert_to_webp(src_path):
     dest_dir = os.path.dirname(dest_path)
     os.makedirs(dest_dir, exist_ok=True)
 
-    # Check modification time: convert if new or updated
+    # Convert if new or updated
     if os.path.exists(dest_path):
         src_mtime = os.path.getmtime(src_path)
         dest_mtime = os.path.getmtime(dest_path)
@@ -47,10 +49,12 @@ def convert_to_webp(src_path):
             return
 
     # Retry if file is temporarily locked
-    for attempt in range(3):
+    for attempt in range(1, RETRY_ATTEMPTS + 1):
         try:
             cmd = [
-                "magick", src_path, "-quality", str(WEBP_QUALITY),
+                "magick", src_path,
+                "-colorspace", "sRGB",  # preserves colors
+                "-quality", str(WEBP_QUALITY),
                 "-define", f"webp:method={WEBP_METHOD}",
                 "-define", f"webp:lossless={'true' if WEBP_LOSSLESS else 'false'}",
                 dest_path
@@ -59,10 +63,10 @@ def convert_to_webp(src_path):
             logging.info(f"[Converted] {src_path} → {dest_path}")
             break
         except (PermissionError, subprocess.CalledProcessError) as e:
-            logging.warning(f"[Retry {attempt+1}] Failed to convert {src_path}: {e}")
-            time.sleep(2)
+            logging.warning(f"[Retry {attempt}] Failed to convert {src_path}: {e}")
+            time.sleep(RETRY_DELAY)
     else:
-        logging.error(f"Failed to convert after retries: {src_path}")
+        logging.error(f"Failed to convert after {RETRY_ATTEMPTS} retries: {src_path}")
 
 # --- Watchdog event handler ---
 class JpegHandler(FileSystemEventHandler):
@@ -76,9 +80,23 @@ class JpegHandler(FileSystemEventHandler):
             logging.info(f"Detected modified file: {event.src_path}")
             convert_to_webp(event.src_path)
 
+# --- Initial scan for existing files ---
+def initial_scan():
+    logging.info("Starting initial scan for existing files...")
+    for root, _, files in os.walk(INPUT_DIR):
+        for f in files:
+            src_path = os.path.join(root, f)
+            convert_to_webp(src_path)
+    logging.info("Initial scan complete.")
+
 # --- Main observer ---
 if __name__ == "__main__":
     logging.info(f"Starting watcher on {INPUT_DIR}, output to {OUTPUT_DIR}")
+
+    # 1. Initial scan
+    initial_scan()
+
+    # 2. Start Watchdog observer
     observer = Observer()
     observer.schedule(JpegHandler(), INPUT_DIR, recursive=True)
     observer.start()
