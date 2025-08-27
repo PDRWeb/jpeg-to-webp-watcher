@@ -1,11 +1,15 @@
 FROM python:3.11-slim
 
-# Install ImageMagick and WebP codec
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Install ImageMagick and WebP codec with security updates
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
     imagemagick webp \
+ && apt-get clean \
  && rm -rf /var/lib/apt/lists/*
 
-# Python deps
+# Set Python to unbuffered mode (prints show immediately in logs)
+ENV PYTHONUNBUFFERED=1
+
+ # Python deps
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
