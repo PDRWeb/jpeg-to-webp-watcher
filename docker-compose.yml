@@ -1,0 +1,15 @@
+services:
+  jpeg-webp-watcher:
+    build: .
+    container_name: jpeg-webp-watcher
+    environment:
+      INPUT_DIR: /data/input
+      OUTPUT_DIR: /data/output
+      WEBP_QUALITY: "82"
+      WEBP_METHOD: "6"
+      WEBP_LOSSLESS: "false"
+    volumes:
+      - /path/to/host-input:/data/input:ro
+      - /path/to/host-output:/data/output
+    user: "${UID:-1000}:${GID:-1000}"
+    restart: unless-stopped
