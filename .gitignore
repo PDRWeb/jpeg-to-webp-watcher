@@ -1,0 +1,7 @@
+/data
+/input
+/output
+*.jpg
+*.jpeg
+*.webp
+__pycache__/
