@@ -23,8 +23,8 @@ RUN mkdir -p /data/input /data/output
 # Optional: set sane defaults (override at runtime)
 ENV INPUT_DIR=/data/input
 ENV OUTPUT_DIR=/data/output
-ENV WEBP_QUALITY=82
-ENV WEBP_METHOD=6
+ENV WEBP_QUALITY=100
+ENV WEBP_METHOD=4
 ENV WEBP_LOSSLESS=false
 
 CMD ["python", "watcher.py"]

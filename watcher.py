@@ -1,125 +1,92 @@
 import os
-import time
 import subprocess
-import shutil
+import time
+import logging
 from watchdog.observers import Observer
-from watchdog.events import PatternMatchingEventHandler
+from watchdog.events import FileSystemEventHandler
 
+# --- Configuration ---
 INPUT_DIR = os.environ.get("INPUT_DIR", "/data/input")
 OUTPUT_DIR = os.environ.get("OUTPUT_DIR", "/data/output")
+WEBP_QUALITY = int(os.environ.get("WEBP_QUALITY", 100))
+WEBP_METHOD = int(os.environ.get("WEBP_METHOD", 4))
+WEBP_LOSSLESS = os.environ.get("WEBP_LOSSLESS", "false").lower() == "true"
 
-# WebP tuning (env overrides)
-WEBP_QUALITY = os.environ.get("WEBP_QUALITY", "82")     # 0-100 (ignored if lossless)
-WEBP_METHOD  = os.environ.get("WEBP_METHOD", "6")       # 0-6 (higher = slower/better)
-WEBP_LOSSLESS = os.environ.get("WEBP_LOSSLESS", "false").lower() in ("1","true","yes","y")
+# --- Logging setup ---
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
 
-# Choose ImageMagick binary (prefer 'magick' if present, else 'convert')
-IM_BIN = shutil.which("magick") or shutil.which("convert")
-if IM_BIN is None:
-    raise RuntimeError("ImageMagick not found in PATH. Ensure it's installed in the container.")
-
-stats = {"converted": 0, "skipped": 0, "errors": 0}
-
-def is_jpeg(path: str) -> bool:
-    ext = os.path.splitext(path)[1].lower()
-    return ext in [".jpg", ".jpeg"]
-
-def needs_conversion(src_path: str, dest_path: str) -> bool:
-    """Convert if dest missing or source is newer."""
-    if not os.path.exists(dest_path):
-        return True
-    return os.path.getmtime(src_path) > os.path.getmtime(dest_path)
-
-def ensure_parent_dir(path: str):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-
-def build_im_cmd(src: str, dest: str) -> list:
-    # Support both IM v6 ("convert") and v7 ("magick convert")
-    if os.path.basename(IM_BIN) == "magick":
-        base = [IM_BIN, "convert"]
-    else:
-        base = [IM_BIN]
-
-    # Common flags:
-    # -strip removes metadata; adjust if you want to keep EXIF/color profiles
-    cmd = base + [src, "-strip"]
-
-    # WebP tuning
-    cmd += ["-define", f"webp:method={WEBP_METHOD}"]
-    if WEBP_LOSSLESS:
-        cmd += ["-define", "webp:lossless=true"]
-    else:
-        cmd += ["-quality", WEBP_QUALITY, "-define", "webp:auto-filter=true", "-define", "webp:image-hint=photo"]
-
-    cmd += [dest]
-    return cmd
-
-def convert_to_webp(src_path: str, count_stats=True):
-    if not is_jpeg(src_path):
+# --- Conversion function ---
+def convert_to_webp(src_path):
+    basename = os.path.basename(src_path)
+    
+    # Ignore temp or network files
+    if basename.startswith(".") or basename.startswith("~") or ".smbdelete" in basename:
+        logging.debug(f"Ignored temporary file: {src_path}")
         return
 
+    # Ensure file is a JPEG
+    if not src_path.lower().endswith((".jpg", ".jpeg")):
+        logging.debug(f"Skipped non-JPEG file: {src_path}")
+        return
+
+    # Determine destination path
     rel_path = os.path.relpath(src_path, INPUT_DIR)
-    dest_path = os.path.splitext(os.path.join(OUTPUT_DIR, rel_path))[0] + ".webp"
-    ensure_parent_dir(dest_path)
+    dest_path = os.path.join(OUTPUT_DIR, os.path.splitext(rel_path)[0] + ".webp")
+    dest_dir = os.path.dirname(dest_path)
+    os.makedirs(dest_dir, exist_ok=True)
 
-    if needs_conversion(src_path, dest_path):
+    # Check modification time: convert if new or updated
+    if os.path.exists(dest_path):
+        src_mtime = os.path.getmtime(src_path)
+        dest_mtime = os.path.getmtime(dest_path)
+        if src_mtime <= dest_mtime:
+            logging.info(f"Skipping (already processed): {src_path}")
+            return
+
+    # Retry if file is temporarily locked
+    for attempt in range(3):
         try:
-            cmd = build_im_cmd(src_path, dest_path)
-            subprocess.run(cmd, check=True)
-            print(f"[Converted] {src_path} → {dest_path}")
-            if count_stats: stats["converted"] += 1
-        except subprocess.CalledProcessError as e:
-            print(f"[Error] Failed to convert {src_path}: {e}")
-            if count_stats: stats["errors"] += 1
+            cmd = [
+                "magick", src_path, "-quality", str(WEBP_QUALITY),
+                "-define", f"webp:method={WEBP_METHOD}",
+                "-define", f"webp:lossless={'true' if WEBP_LOSSLESS else 'false'}",
+                dest_path
+            ]
+            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            logging.info(f"[Converted] {src_path} → {dest_path}")
+            break
+        except (PermissionError, subprocess.CalledProcessError) as e:
+            logging.warning(f"[Retry {attempt+1}] Failed to convert {src_path}: {e}")
+            time.sleep(2)
     else:
-        print(f"[Skipped] {src_path} already up-to-date")
-        if count_stats: stats["skipped"] += 1
+        logging.error(f"Failed to convert after retries: {src_path}")
 
-class JpegHandler(PatternMatchingEventHandler):
-    def __init__(self):
-        super().__init__(
-            patterns=["*.jpg", "*.jpeg", "*.JPG", "*.JPEG"],
-            ignore_patterns=["*~", ".*.swp", "*.tmp", ".*.crdownload", ".*.part"],
-            ignore_directories=False,
-            case_sensitive=False,
-        )
-
+# --- Watchdog event handler ---
+class JpegHandler(FileSystemEventHandler):
     def on_created(self, event):
         if not event.is_directory:
-            # Small delay so apps that write in chunks finish writing
-            time.sleep(0.15)
-            convert_to_webp(event.src_path, count_stats=False)
+            logging.info(f"Detected new file: {event.src_path}")
+            convert_to_webp(event.src_path)
 
     def on_modified(self, event):
         if not event.is_directory:
-            time.sleep(0.15)
-            convert_to_webp(event.src_path, count_stats=False)
+            logging.info(f"Detected modified file: {event.src_path}")
+            convert_to_webp(event.src_path)
 
+# --- Main observer ---
 if __name__ == "__main__":
-    # Initial bulk scan
-    print("🔄 Running initial scan...")
-    for root, _, files in os.walk(INPUT_DIR):
-        for f in files:
-            full = os.path.join(root, f)
-            if is_jpeg(full):
-                convert_to_webp(full, count_stats=True)
-
-    # Summary
-    print("\n📊 Initial Scan Summary:")
-    print(f"   ✅ Converted: {stats['converted']}")
-    print(f"   ⏩ Skipped:   {stats['skipped']}")
-    print(f"   ❌ Errors:    {stats['errors']}\n")
-
-    # Start watching
-    handler = JpegHandler()
+    logging.info(f"Starting watcher on {INPUT_DIR}, output to {OUTPUT_DIR}")
     observer = Observer()
-    observer.schedule(handler, INPUT_DIR, recursive=True)
+    observer.schedule(JpegHandler(), INPUT_DIR, recursive=True)
     observer.start()
-    print(f"📂 Watching {INPUT_DIR} for changes... (press Ctrl+C to stop)")
 
     try:
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
+        logging.info("Stopping watcher...")
         observer.stop()
     observer.join()

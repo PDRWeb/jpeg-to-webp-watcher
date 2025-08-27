@@ -5,8 +5,8 @@ services:
     environment:
       INPUT_DIR: /data/input
       OUTPUT_DIR: /data/output
-      WEBP_QUALITY: "82"
-      WEBP_METHOD: "6"
+      WEBP_QUALITY: "100"
+      WEBP_METHOD: "4"
       WEBP_LOSSLESS: "false"
     volumes:
       - /path/to/host-input:/data/input:ro
